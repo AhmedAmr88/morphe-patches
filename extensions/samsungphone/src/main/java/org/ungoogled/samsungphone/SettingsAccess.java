@@ -139,7 +139,15 @@ public final class SettingsAccess {
 
     // Settings.Global
 
+    /**
+     * One UI's "Swipe to call or send messages" switch (Settings > Advanced features) lives in Settings.Global, which
+     * the app may not write and other phones do not have: it reads as on, so swiping a contact right calls it and
+     * swiping it left opens a message.
+     */
+    private static final String SWIPE_TO_CALL = "swipe_to_call_message";
+
     public static int globalGetInt(ContentResolver r, String name, int def) {
+        if (SWIPE_TO_CALL.equals(name)) return 1;
         try {
             return Settings.Global.getInt(r, name, def);
         } catch (SecurityException e) {
