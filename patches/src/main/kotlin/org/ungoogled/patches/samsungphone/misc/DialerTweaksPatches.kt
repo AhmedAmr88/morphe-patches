@@ -71,8 +71,10 @@ val dialpadLayoutPatch = resourcePatch(
         required = true,
     )
 
-    val floatingWidth by intOption(
+        val floatingWidth by intOption(
         key = "floatingDialpadWidth",
         default = 300,
-        title = "Large screen: floating dial pad width (dp)",
-        description = "Width of the dial
+        title = "Large screen: dial pad width (dp)",
+        description = "Samsung: 400.",
+        required = true,
+    )
