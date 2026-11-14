@@ -17,14 +17,22 @@ public class SemSystemProperties {
         }
     }
 
+    /** Android's value, or for the dual SIM properties One UI has and other phones lack, TelephonyManager's. */
+    private static String value(String key) {
+        String value = real(key);
+        if (!value.isEmpty()) return value;
+        String sim = org.ungoogled.samsungphone.SimCompat.property(key);
+        return sim != null ? sim : "";
+    }
+
     public static java.lang.String get(java.lang.String p0) {
-        String value = real(p0);
+        String value = value(p0);
         if (value.isEmpty() && "ro.build.version.oneui".equals(p0)) return "0";
         return value;
     }
 
     public static java.lang.String get(java.lang.String p0, java.lang.String p1) {
-        String value = real(p0);
+        String value = value(p0);
         return value.isEmpty() ? p1 : value;
     }
 
