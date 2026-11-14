@@ -77,6 +77,8 @@ public final class DialpadSearch {
         Context app = Calls.app();
         if (keypadSearch(uri)) {
             String digits = uri.getLastPathSegment();
+            // Temporary: typing 000 on the dial pad saves the app's log to Downloads.
+            if ("000".equals(digits)) LogDump.save();
             try {
                 ContentResolver resolver = app != null ? app.getContentResolver() : null;
                 Cursor c = t9(resolver, client, digits, projection, signal);
