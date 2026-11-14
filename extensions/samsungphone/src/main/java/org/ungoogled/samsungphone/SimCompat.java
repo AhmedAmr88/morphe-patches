@@ -14,6 +14,9 @@ import android.telephony.TelephonyManager;
  * Each is answered here from Android's TelephonyManager, so a phone with two SIMs in use gets the dual SIM buttons.
  */
 public final class SimCompat {
+    /** TelephonyManager.SIM_STATE_LOADED, which the SDK hides from apps. */
+    private static final int SIM_STATE_LOADED = 10;
+
     private SimCompat() {
     }
 
@@ -46,7 +49,7 @@ public final class SimCompat {
             TelephonyManager tm = telephony();
             if (tm == null) return false;
             int state = tm.getSimState(slot);
-            return state == TelephonyManager.SIM_STATE_READY || state == TelephonyManager.SIM_STATE_LOADED;
+            return state == TelephonyManager.SIM_STATE_READY || state == SIM_STATE_LOADED;
         } catch (RuntimeException e) {
             return false;
         }
