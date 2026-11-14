@@ -10,34 +10,42 @@ import android.os.CancellationSignal;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.RemoteException;
+import android.os.SystemClock;
+import android.provider.CallLog;
 import android.provider.ContactsContract;
 import android.util.Log;
 import android.widget.Toast;
 
 import java.text.Normalizer;
-import java.util.HashSet;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
-import java.util.Set;
+import java.util.Map;
 
 /**
  * The dial pad's contact suggestions. Samsung Phone reads them through a ContentProviderClient, which the providers
  * patch does not see:
  * <ul>
  * <li>names from content://com.android.contacts/contacts/dialer_keypad/filter/DIGITS, a T9 search only Samsung's
- * contacts provider has (Android's throws "Unknown URI", so nothing was suggested). Answered here: a contact whose
- * name has a word starting with the typed digits on the keypad letters (2 = ABC, ...), with action_code holding the
- * name in digits so the app highlights the matched letters.</li>
+ * contacts provider has. Answered here: contacts with a word of the name starting with the typed digits on the keypad
+ * letters (2 = ABC, ...), the ones you call most first, with action_code holding the name in digits so the app
+ * highlights the matched letters.</li>
  * <li>numbers from Android's phone table with a selection naming Samsung's sec_read_only_contacts column in a
  * subquery, which Android's provider refuses: the condition is left out.</li>
  * </ul>
- * Everything else goes to ProviderCalls like the app's ContentResolver calls.
+ * Every other query (call history among them) goes to the provider exactly as the app asked.
  */
 public final class DialpadSearch {
     private static final String TAG = "UA";
     private static final String READ_ONLY_CONTACTS =
             "contact_id IN (SELECT _id FROM contacts WHERE sec_read_only_contacts = 0)";
     private static final int MAX_RESULTS = 200;
+    /** Calls read to rank the contacts you call most. */
+    private static final int CALL_HISTORY = 1000;
+    private static final long CALL_COUNTS_MAX_AGE_MS = 60_000;
     /** Temporary: shows what the name search found (or why it failed) as a toast. */
     private static final boolean DEBUG = true;
 
@@ -52,6 +60,9 @@ public final class DialpadSearch {
             ContactsContract.CommonDataKinds.Phone.PHONETIC_NAME,
             ContactsContract.CommonDataKinds.Phone.NUMBER,
     };
+
+    private static Map<String, Integer> callCounts = Collections.emptyMap();
+    private static long callCountsAt;
 
     private DialpadSearch() {
     }
@@ -78,19 +89,17 @@ public final class DialpadSearch {
             }
         }
         if (selection != null && selection.contains(READ_ONLY_CONTACTS)) {
-            selection = selection.replace(READ_ONLY_CONTACTS, "1");
+            // The dial pad's number search: a missing result would drop every suggestion, so answer nothing instead.
+            try {
+                Cursor c = client.query(uri, projection, selection.replace(READ_ONLY_CONTACTS, "1"), args, sort,
+                        signal);
+                return c != null ? c : empty(projection);
+            } catch (RuntimeException e) {
+                Log.w(TAG, "dial pad number search failed: " + e);
+                return empty(projection);
+            }
         }
-        Cursor c;
-        try {
-            c = app != null
-                    ? ProviderCalls.query(app.getContentResolver(), uri, projection, selection, args, sort, signal)
-                    : client.query(uri, projection, selection, args, sort, signal);
-        } catch (RuntimeException e) {
-            Log.w(TAG, "dial pad query failed: " + uri + ": " + e);
-            c = null;
-        }
-        // The app's search turns a missing result into an error that drops every suggestion: answer nothing instead.
-        return c != null ? c : empty(projection);
+        return client.query(uri, projection, selection, args, sort, signal);
     }
 
     private static Cursor empty(String[] projection) {
@@ -109,6 +118,39 @@ public final class DialpadSearch {
         return path.size() >= 3 && path.contains("dialer_keypad") && path.contains("filter");
     }
 
+    /** One contact the name search found. */
+    private static final class Match {
+        final long contactId;
+        final String name, alt, sortKey, lookup, phonetic, code, altCode;
+        final int starred;
+        final long photoId;
+        String number;
+        int calls;
+        int bestNumberCalls = -1;
+
+        Match(Cursor c, String name, String alt, String code, String altCode) {
+            contactId = c.getLong(0);
+            this.name = name;
+            this.alt = alt;
+            sortKey = c.getString(3);
+            starred = c.getInt(4);
+            photoId = c.isNull(5) ? 0L : c.getLong(5);
+            lookup = c.getString(6);
+            phonetic = c.getString(7);
+            this.code = code;
+            this.altCode = altCode;
+        }
+
+        /** Adds one of the contact's numbers: its calls count, and the most called number is the one shown. */
+        void addNumber(String number, int calls) {
+            this.calls += calls;
+            if (calls > bestNumberCalls) {
+                bestNumberCalls = calls;
+                this.number = number;
+            }
+        }
+    }
+
     private static Cursor t9(ContentResolver resolver, ContentProviderClient client, String digits, String[] projection,
                              CancellationSignal signal) throws RemoteException {
         if (projection == null) return null;
@@ -116,6 +158,7 @@ public final class DialpadSearch {
         String query = digits == null ? "" : digits.replaceAll("[^0-9]", "");
         if (query.isEmpty()) return out;
 
+        Map<String, Integer> counts = callCounts(resolver);
         Uri phones = ContactsContract.CommonDataKinds.Phone.CONTENT_URI;
         String order = ContactsContract.CommonDataKinds.Phone.STARRED + " DESC, "
                 + ContactsContract.CommonDataKinds.Phone.SORT_KEY_PRIMARY + ", "
@@ -125,63 +168,109 @@ public final class DialpadSearch {
                 : client.query(phones, PHONE_COLUMNS, null, null, order, signal);
         if (c == null) return out;
 
-        Set<Long> seen = new HashSet<>();
+        Map<Long, Match> found = new LinkedHashMap<>();
         try {
-            while (c.moveToNext() && out.getCount() < MAX_RESULTS) {
+            while (c.moveToNext()) {
                 if (signal != null) signal.throwIfCanceled();
                 long contactId = c.getLong(0);
-                if (seen.contains(contactId)) continue;
-
-                String name = c.getString(1);
-                String alt = c.getString(2);
-                String code = encode(name);
-                String altCode = encode(alt);
-                if (!matches(name, code, query) && !matches(alt, altCode, query)) continue;
-                seen.add(contactId);
-
-                Object[] row = new Object[projection.length];
-                for (int i = 0; i < projection.length; i++) {
-                    row[i] = value(projection[i], c, name, alt, code, altCode);
+                Match match = found.get(contactId);
+                if (match == null) {
+                    String name = c.getString(1);
+                    String alt = c.getString(2);
+                    String code = encode(name);
+                    String altCode = encode(alt);
+                    if (!matches(name, code, query) && !matches(alt, altCode, query)) continue;
+                    match = new Match(c, name, alt, code, altCode);
+                    found.put(contactId, match);
                 }
-                out.addRow(row);
+                String number = c.getString(8);
+                Integer calls = counts.get(key(number));
+                match.addNumber(number, calls != null ? calls : 0);
             }
         } finally {
             c.close();
         }
+
+        // Most called first, then favourites, then the contacts' own order (by name).
+        List<Match> ranked = new ArrayList<>(found.values());
+        Collections.sort(ranked, (a, b) -> {
+            if (a.calls != b.calls) return Integer.compare(b.calls, a.calls);
+            return Integer.compare(b.starred, a.starred);
+        });
+        for (Match match : ranked) {
+            if (out.getCount() >= MAX_RESULTS) break;
+            Object[] row = new Object[projection.length];
+            for (int i = 0; i < projection.length; i++) {
+                row[i] = value(projection[i], match);
+            }
+            out.addRow(row);
+        }
         return out;
     }
 
-    private static Object value(String column, Cursor c, String name, String alt, String code, String altCode) {
+    /** How many of the recent calls were with each number (by its last 9 digits). Kept for a minute. */
+    private static synchronized Map<String, Integer> callCounts(ContentResolver resolver) {
+        long now = SystemClock.elapsedRealtime();
+        if (callCountsAt != 0 && now - callCountsAt < CALL_COUNTS_MAX_AGE_MS) return callCounts;
+        callCountsAt = now;
+        Map<String, Integer> counts = new HashMap<>();
+        if (resolver != null) {
+            try (Cursor c = resolver.query(CallLog.Calls.CONTENT_URI, new String[]{CallLog.Calls.NUMBER}, null, null,
+                    CallLog.Calls.DATE + " DESC")) {
+                int read = 0;
+                while (c != null && c.moveToNext() && read++ < CALL_HISTORY) {
+                    String key = key(c.getString(0));
+                    if (key == null) continue;
+                    Integer n = counts.get(key);
+                    counts.put(key, n == null ? 1 : n + 1);
+                }
+            } catch (RuntimeException e) {
+                Log.w(TAG, "call history for the dial pad ranking: " + e);
+            }
+        }
+        callCounts = counts;
+        return counts;
+    }
+
+    /** A phone number's last 9 digits, so 0101..., +20101... and 0020101... match. */
+    private static String key(String number) {
+        if (number == null) return null;
+        String d = number.replaceAll("[^0-9]", "");
+        if (d.isEmpty()) return null;
+        return d.length() > 9 ? d.substring(d.length() - 9) : d;
+    }
+
+    private static Object value(String column, Match m) {
         switch (column) {
             case "_id":
             case "contact_id":
-                return c.getLong(0);
+                return m.contactId;
             case "display_name":
-                return name;
+                return m.name;
             case "display_name_alt":
-                return alt != null ? alt : name;
+                return m.alt != null ? m.alt : m.name;
             case "sort_key":
             case "sort_key_alt":
-                return c.getString(3);
+                return m.sortKey;
             case "starred":
-                return c.getInt(4);
+                return m.starred;
             case "photo_id":
-                return c.isNull(5) ? 0L : c.getLong(5);
+                return m.photoId;
             case "lookup":
-                return c.getString(6);
+                return m.lookup;
             case "phonetic_name":
-                return c.getString(7);
+                return m.phonetic;
             case "data1":
             case "number":
-                return c.getString(8);
+                return m.number;
             case "action_code":
-                return code;
+                return m.code;
             case "action_code_alt":
-                return alt != null ? altCode : code;
+                return m.alt != null ? m.altCode : m.code;
             case "action_code_type":
                 return 0;
             case "sec_primary_name_initial":
-                return initial(name);
+                return initial(m.name);
             default:
                 return null;
         }

@@ -1,7 +1,10 @@
 package org.ungoogled.samsungphone;
 
 import android.content.Context;
+import android.os.Handler;
+import android.os.Looper;
 import android.telephony.TelephonyManager;
+import android.widget.Toast;
 
 /**
  * Samsung Phone decides whether to show the SIM 1 / SIM 2 call buttons from One UI's own signals, which other phones
@@ -16,6 +19,9 @@ import android.telephony.TelephonyManager;
 public final class SimCompat {
     /** TelephonyManager.SIM_STATE_LOADED, which the SDK hides from apps. */
     private static final int SIM_STATE_LOADED = 10;
+    /** Temporary: shows once what the dual SIM check sees, as a toast. */
+    private static final boolean DEBUG = true;
+    private static boolean shown;
 
     private SimCompat() {
     }
@@ -35,12 +41,24 @@ public final class SimCompat {
 
     /** "dsds" when the phone has two SIM slots in use, else "". */
     public static String multiSimConfig() {
+        String config = "";
+        int modems = -1;
         try {
             TelephonyManager tm = telephony();
-            if (tm != null && tm.getActiveModemCount() >= 2) return "dsds";
+            if (tm != null) modems = tm.getActiveModemCount();
+            if (modems >= 2) config = "dsds";
         } catch (RuntimeException ignored) {
         }
-        return "";
+        debug("SIM: modems=" + modems + " sim1=" + simPresent(0) + " sim2=" + simPresent(1));
+        return config;
+    }
+
+    private static synchronized void debug(String text) {
+        if (!DEBUG || shown) return;
+        Context app = Calls.app();
+        if (app == null) return;
+        shown = true;
+        new Handler(Looper.getMainLooper()).post(() -> Toast.makeText(app, text, Toast.LENGTH_LONG).show());
     }
 
     /** A SIM is in the slot (0 or 1) and usable. */
