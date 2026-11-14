@@ -7,9 +7,12 @@ import android.database.Cursor;
 import android.database.MatrixCursor;
 import android.net.Uri;
 import android.os.CancellationSignal;
+import android.os.Handler;
+import android.os.Looper;
 import android.os.RemoteException;
 import android.provider.ContactsContract;
 import android.util.Log;
+import android.widget.Toast;
 
 import java.text.Normalizer;
 import java.util.HashSet;
@@ -35,6 +38,8 @@ public final class DialpadSearch {
     private static final String READ_ONLY_CONTACTS =
             "contact_id IN (SELECT _id FROM contacts WHERE sec_read_only_contacts = 0)";
     private static final int MAX_RESULTS = 200;
+    /** Temporary: shows what the name search found (or why it failed) as a toast. */
+    private static final boolean DEBUG = true;
 
     private static final String[] PHONE_COLUMNS = {
             ContactsContract.CommonDataKinds.Phone.CONTACT_ID,
@@ -60,21 +65,42 @@ public final class DialpadSearch {
                                String[] args, String sort, CancellationSignal signal) throws RemoteException {
         Context app = Calls.app();
         if (keypadSearch(uri)) {
+            String digits = uri.getLastPathSegment();
             try {
                 ContentResolver resolver = app != null ? app.getContentResolver() : null;
-                return t9(resolver, client, uri.getLastPathSegment(), projection, signal);
+                Cursor c = t9(resolver, client, digits, projection, signal);
+                debug(app, "T9 " + digits + ": " + (c == null ? "null" : c.getCount() + " contacts"));
+                return c != null ? c : empty(projection);
             } catch (RuntimeException e) {
                 Log.w(TAG, "dial pad name search failed: " + e);
-                return null;
+                debug(app, "T9 " + digits + " failed: " + e);
+                return empty(projection);
             }
         }
         if (selection != null && selection.contains(READ_ONLY_CONTACTS)) {
             selection = selection.replace(READ_ONLY_CONTACTS, "1");
         }
-        if (app != null) {
-            return ProviderCalls.query(app.getContentResolver(), uri, projection, selection, args, sort, signal);
+        Cursor c;
+        try {
+            c = app != null
+                    ? ProviderCalls.query(app.getContentResolver(), uri, projection, selection, args, sort, signal)
+                    : client.query(uri, projection, selection, args, sort, signal);
+        } catch (RuntimeException e) {
+            Log.w(TAG, "dial pad query failed: " + uri + ": " + e);
+            c = null;
         }
-        return client.query(uri, projection, selection, args, sort, signal);
+        // The app's search turns a missing result into an error that drops every suggestion: answer nothing instead.
+        return c != null ? c : empty(projection);
+    }
+
+    private static Cursor empty(String[] projection) {
+        return new MatrixCursor(projection != null ? projection : new String[]{"_id"}, 0);
+    }
+
+    private static void debug(Context app, String text) {
+        if (!DEBUG || app == null) return;
+        Log.i(TAG, text);
+        new Handler(Looper.getMainLooper()).post(() -> Toast.makeText(app, text, Toast.LENGTH_SHORT).show());
     }
 
     private static boolean keypadSearch(Uri uri) {

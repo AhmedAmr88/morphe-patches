@@ -83,6 +83,8 @@ public final class SettingsAccess {
 
     public static int systemGetInt(ContentResolver r, String name, int def) {
         try {
+            int sim = SimCompat.simSwitch(name);
+            if (sim >= 0 && Settings.System.getString(r, name) == null) return sim;
             return Settings.System.getInt(r, name, def);
         } catch (SecurityException e) {
             return def;
@@ -91,6 +93,8 @@ public final class SettingsAccess {
 
     public static int systemGetInt(ContentResolver r, String name) throws Settings.SettingNotFoundException {
         try {
+            int sim = SimCompat.simSwitch(name);
+            if (sim >= 0 && Settings.System.getString(r, name) == null) return sim;
             return Settings.System.getInt(r, name);
         } catch (SecurityException e) {
             throw new Settings.SettingNotFoundException(name);
